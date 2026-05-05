@@ -1,6 +1,0 @@
-Traceback (most recent call last):
-  File "C:\New Drive\PROJECTs\transcript\debug_engine.py", line 9, in <module>
-    f.write(str(result))
-  File "C:\Users\sanka\AppData\Local\Programs\Python\Python39\lib\encodings\cp1252.py", line 19, in encode
-    return codecs.charmap_encode(input,self.errors,encoding_table)[0]
-UnicodeEncodeError: 'charmap' codec can't encode characters in position 2-8: character maps to <undefined>

@@ -14,9 +14,9 @@ class DatabaseManager:
             self.db = self.client[settings.mongo_db_name]
             # Ping database to verify connection
             await self.client.admin.command('ping')
-            print(f"DEBUG: ✅ Successfully connected to database: {settings.mongo_db_name}")
+            print(f"DEBUG: SUCCESS: Successfully connected to database: {settings.mongo_db_name}")
         except Exception as e:
-            print(f"DEBUG: ❌ FAILED to connect to MongoDB: {e}")
+            print(f"DEBUG: ERROR: FAILED to connect to MongoDB: {e}")
             raise e
 
     async def disconnect(self):

@@ -3,11 +3,13 @@ import asyncio
 import logging
 import torch
 import soundfile as sf
+import numpy as np
 from typing import List, Dict, Any
 from pathlib import Path
 from engine import NeuralSyncEngine, ScholarShield
 from app.services.rag_service import rag_service
 from app.core.config import settings
+from app.core.gpu_manager import gpu_manager
 
 logger = logging.getLogger("dubbing-service")
 
@@ -64,15 +66,22 @@ class DubbingService:
         self._current_model_id = model_id
 
     async def translate_and_dub_parallel(
-        self, segments: List[Dict[str, Any]], target_languages: List[str]
+        self, segments: List[Dict[str, Any]], target_languages: List[str],
+        audio_path: str = None  # optional: source audio path for context
     ) -> Dict[str, Any]:
         """
         Translates and generates audio for multiple languages in parallel.
-        Returns: { lang_code: { "audio_path": str, "transcript": str } }
+        Uses a Semaphore to limit concurrent processing.
         """
+        # 1. Group segments by sentence to ensure natural 'flow' and prevent 'breaking' sentences
+        grouped_segments = self._group_segments_by_sentence(segments)
+        logger.info(f"Grouped {len(segments)} segments into {len(grouped_segments)} sentence blocks for natural flow.")
+
         self._load_translator()
         
         loop = asyncio.get_event_loop()
+        # Limit to 2 concurrent languages to avoid OOM on 6GB VRAM
+        vram_semaphore = asyncio.Semaphore(2)
         
         # 1. OPTIMIZATION: Extract texts and run RAG & Shielding ONLY ONCE for the original source!
         texts = [seg["text"] for seg in segments]
@@ -88,10 +97,14 @@ class DubbingService:
         # Shielding Math/STEM Phonics
         masked_text, shield_mapping = getattr(self.shield, "shield_text")(refined_source)
         
-        # Parallel execution across languages
+        # Parallel execution across languages with semaphore protection
+        async def semi_limited_process(lang):
+            async with vram_semaphore:
+                return await self._process_single_language(grouped_segments, lang, masked_text, shield_mapping)
+
         tasks = []
         for lang in target_languages:
-            tasks.append(self._process_single_language(segments, lang, masked_text, shield_mapping))
+            tasks.append(semi_limited_process(lang))
         
         results = await asyncio.gather(*tasks)
         
@@ -103,14 +116,11 @@ class DubbingService:
         }
 
     def _clean_hallucinations(self, text: str) -> str:
-        """Removes repetitive noise loops (e.g. S.S.S...) while preserving valid sentences."""
+        """Removes repetitive noise loops while preserving valid sentences."""
         if not text: return ""
         import re
-        # Target: Multiple repetitions of the sibilant "एस" or "स" or "S"
-        # We look for something like "एस. " repeating 5+ times
         pattern = r"((?:एस|स|S|s)\.?\s*){5,}"
         cleaned = re.sub(pattern, " ", text, flags=re.IGNORECASE)
-        # Target: any word repeating more than 6 times consecutively
         cleaned = re.sub(r"(\b\w+\b\s*)\1{6,}", r"\1", cleaned, flags=re.IGNORECASE)
         return cleaned.strip()
 
@@ -118,67 +128,70 @@ class DubbingService:
         """Process translation and TTS for a single target language."""
         try:
             logger.info(f"Processing language: {target_lang}")
-            loop = asyncio.get_event_loop()
             
             # Map target_lang to IndicTrans2 language code format
-            it2_lang = "hin_Deva" # Defaults to Hindi if map lacks it
+            it2_lang = "hin_Deva" 
             lang_map = {
-                "hi": "hin_Deva", "mr": "mar_Deva", " gu": "guj_Gujr", 
+                "hi": "hin_Deva", "mr": "mar_Deva", "gu": "guj_Gujr",
                 "ta": "tam_Taml", "te": "tel_Telu", "kn": "kan_Knda"
             }
             if target_lang in lang_map:
                 it2_lang = lang_map[target_lang]
             
             # 1. RAG-Enhanced Translation
-            # Step C: Translation (Optimized Phonics) - run in executor to prevent blocking
-            from functools import partial
-            translate_fn = partial(self.translator.translate_batch, [masked_text], src_lang="eng_Latn", tgt_lang=it2_lang)
-            raw_translated_blob = await loop.run_in_executor(None, translate_fn)
-            raw_translated_blob = raw_translated_blob[0]
+            # OPTIMIZATION: Translate segments as a batch to preserve mapping exactly
+            masked_segments = []
+            # We assume domain is passed or detected; for demo reliability, we can detect it here if not passed
+            from app.services.sbert_service import domain_service
+            # Detect domain for the whole project context if needed, or use a default
+            project_domain = domain_service.detect_domain(" ".join([s["text"] for s in segments]))
+            
+            for seg in segments:
+                m_t, _ = getattr(self.shield, "shield_text")(seg["text"], domain=project_domain)
+                masked_segments.append(m_t)
+            
+            raw_translated_segments = await self.translator.translate_batch(masked_segments, src_lang="eng_Latn", tgt_lang=it2_lang)
             
             # Step D: Unshielding
-            final_translated_blob = getattr(self.shield, "unshield_text")(raw_translated_blob, shield_mapping)
-            
-            # Split back into segments (approximate for dubbing)
-            texts = [seg["text"] for seg in segments]
-            translated_texts = [final_translated_blob] if len(texts) == 1 else final_translated_blob.split(". ")
-            if len(translated_texts) < len(texts):
-                translated_texts.extend([""] * (len(texts) - len(translated_texts)))
-            translated_texts = translated_texts[:len(texts)]
-            
-            # Clean hallucinations from every translated segment
-            cleaned_texts = []
+            translated_texts = []
+            for raw_t in raw_translated_segments:
+                final_t = getattr(self.shield, "unshield_text")(raw_t, shield_mapping)
+                translated_texts.append(final_t)
             
             from indic_transliteration import sanscript
             transliteration_map = {
-                "ta": sanscript.TAMIL,
-                "gu": sanscript.GUJARATI,
-                "te": sanscript.TELUGU,
-                "kn": sanscript.KANNADA
+                "ta": sanscript.TAMIL, "gu": sanscript.GUJARATI,
+                "te": sanscript.TELUGU, "kn": sanscript.KANNADA
             }
             
+            cleaned_texts = []
             for t in translated_texts:
                 cleaned = self._clean_hallucinations(t)
-                
-                # Transliterate to native script if necessary so MMS TTS can read it
                 if target_lang in transliteration_map and len(cleaned) > 1:
                     cleaned = sanscript.transliterate(cleaned, sanscript.DEVANAGARI, transliteration_map[target_lang])
-                
                 cleaned_texts.append(cleaned if len(cleaned) > 1 else "")
                 
-            # Combine into a full transcript string
             full_translated_transcript = " ".join([t for t in cleaned_texts if t.strip()])
             
-            # 2. Sequential TTS for segments
-            self._load_tts(target_lang)
-            
-            seg_info = []
-            for idx, text in enumerate(cleaned_texts):
-                if not text.strip():
-                    continue
-                start = segments[idx].get("start", 0)
-                audio_path = await self._generate_tts(text, target_lang, f"seg_{idx}")
-                seg_info.append({"path": audio_path, "start": start})
+            # 2. TTS Generation (Locked for GPU safety)
+            await gpu_manager.acquire_gpu(f"TTS_{target_lang}")
+            try:
+                self._load_tts(target_lang)
+                seg_info = []
+                for idx, text in enumerate(cleaned_texts):
+                    if not text.strip():
+                        continue
+                    start = segments[idx].get("start", 0)
+                    end = segments[idx].get("end", start + 2.0)
+                    audio_path, duration = await self._generate_tts(text, target_lang, f"seg_{idx}")
+                    seg_info.append({
+                        "path": audio_path, 
+                        "start": start, 
+                        "end": end,
+                        "duration": duration
+                    })
+            finally:
+                gpu_manager.release_gpu()
             
             # 3. Concatenate and align audio using FFmpeg
             final_audio_path = self.output_dir / f"final_{target_lang}_{os.urandom(4).hex()}.wav"
@@ -198,18 +211,15 @@ class DubbingService:
             logger.error(f"Failed to process language {target_lang}: {e}")
             return None
 
-    async def _generate_tts(self, text: str, lang: str, label: str) -> str:
-        """Generates TTS for a single piece of text."""
+    async def _generate_tts(self, text: str, lang: str, label: str) -> tuple[str, float]:
+        """Generates TTS for a single piece of text. Returns (path, duration)."""
         output_file = self.output_dir / f"{lang}_{label}.wav"
         try:
             if not text.strip():
                 sf.write(str(output_file), np.zeros(8000), 16000)
-                return str(output_file)
+                return str(output_file), 0.5
 
             from transformers import VitsModel, AutoTokenizer
-            import torch
-            import numpy as np
-
             inputs = self.tts_tokenizer(text, return_tensors="pt").to(self.device)
             with torch.no_grad():
                 output = self.tts_model(**inputs).waveform
@@ -221,30 +231,16 @@ class DubbingService:
                 wav_data = librosa.resample(wav_data, orig_sr=self.tts_model.config.sampling_rate, target_sr=target_sr)
             
             sf.write(str(output_file), wav_data, target_sr)
-            return str(output_file)
+            duration = len(wav_data) / target_sr
+            return str(output_file), duration
         except Exception as e:
             logger.error(f"TTS generation failed for {label}: {e}")
             sf.write(str(output_file), np.zeros(8000), 16000)
-            return str(output_file)
-
-    async def _get_audio_duration(self, path: str) -> float:
-        """Get the duration of an audio file using ffprobe."""
-        import subprocess
-        try:
-            cmd = [
-                "ffprobe", "-v", "error", "-show_entries", "format=duration",
-                "-of", "default=noprint_wrappers=1:nokey=1", path
-            ]
-            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-            return float(result.stdout.strip())
-        except Exception as e:
-            logger.error(f"Failed to probe duration for {path}: {e}")
-            return 0.0
+            return str(output_file), 0.5
 
     async def _merge_segments_to_final_track(self, seg_info: List[Dict], output_path: str, total_duration: float) -> bool:
-        """Align multiple audio segments to their timestamps with SERIAL concatenation (Zero Overlap)."""
+        """Align multiple audio segments with ABSOLUTE positioning (adelay + amix)."""
         import subprocess
-        import os
         
         if not seg_info:
             cmd = ["ffmpeg", "-y", "-f", "lavfi", "-i", f"anullsrc=r=22050:cl=mono", "-t", str(total_duration), output_path]
@@ -254,8 +250,7 @@ class DubbingService:
         try:
             inputs = []
             filter_chains = []
-            concat_inputs = []
-            last_end_time = 0.0
+            amix_labels = []
             
             for i, seg in enumerate(seg_info):
                 if not seg["path"] or not os.path.exists(seg["path"]):
@@ -265,49 +260,59 @@ class DubbingService:
                 inputs.append(seg["path"])
                 input_idx = len(inputs) // 2 - 1 
                 
-                start_time = seg["start"]
-                next_start = seg_info[i+1]["start"] if i < len(seg_info)-1 else total_duration
-                allowed_window = max(0.1, next_start - start_time)
+                start_ms = int(seg["start"] * 1000)
+                # Strict target window
+                target_dur = max(0.1, seg["end"] - seg["start"])
+                gen_dur = seg["duration"]
                 
-                gen_dur = await self._get_audio_duration(seg["path"])
-                scale = gen_dur / allowed_window
-                tempo = 1.0 / scale
-                tempo = max(0.7, min(1.7, tempo))
+                # Speed up or slow down to FIT the exact window
+                tempo = gen_dur / target_dur
+                tempo = max(0.6, min(2.0, tempo))
                 
-                # 1. Add silence from last_end_time to this start_time
-                silence_dur = max(0, start_time - last_end_time)
-                if silence_dur > 0.001:
-                    sil_label = f"sil{i}"
-                    filter_chains.append(f"anullsrc=r=22050:cl=mono:d={silence_dur:.3f}[{sil_label}]")
-                    concat_inputs.append(f"[{sil_label}]")
-                
-                # 2. Add the stretched segment
-                seg_label = f"v{i}"
-                filter_chains.append(f"[{input_idx}:a]atempo={tempo:.2f},volume=3.5[{seg_label}]")
-                concat_inputs.append(f"[{seg_label}]")
-                
-                last_end_time = start_time + (gen_dur / tempo)
+                label = f"a{i}"
+                # 1. Fit to duration 2. Smooth fade out 3. Clean up 4. Delay to start
+                filter_chains.append(
+                    f"[{input_idx}:a]atempo={tempo:.2f},afade=t=out:st={target_dur-0.05:.3f}:d=0.05,"
+                    f"volume=2.5,adelay={start_ms}|{start_ms}[{label}]"
+                )
+                amix_labels.append(f"[{label}]")
             
-            # Final silence padding
-            remaining = total_duration - last_end_time
-            if remaining > 0.001:
-                 fin_sil = "finsil"
-                 filter_chains.append(f"anullsrc=r=22050:cl=mono:d={remaining:.3f}[{fin_sil}]")
-                 concat_inputs.append(f"[{fin_sil}]")
-
-            # Final concat
-            concat_str = f"{''.join(concat_inputs)}concat=n={len(concat_inputs)}:v=0:a=1[out]"
-            full_filter = f"{';'.join(filter_chains)};{concat_str}"
-
-            command = ["ffmpeg", "-y"] + inputs + ["-filter_complex", full_filter, "-map", "[out]", "-c:a", "pcm_s16le", output_path]
+            # Combine all delayed segments. amix with normalize=0 keeps original volumes.
+            # Then apply compand (compressor) for 'broadcast' quality and a limiter to prevent clipping.
+            amix_str = f"{''.join(amix_labels)}amix=inputs={len(amix_labels)}:normalize=0,compand=attacks=0:points=-80/-80|-20/-10|0/-3|20/-3,alimiter=limit=0.9,apad=whole_dur={total_duration:.2f}[out]"
+            filter_chains.append(amix_str)
             
-            logger.info(f"Running Serial Sequencer: {' '.join(command)}")
+            command = ["ffmpeg", "-y"] + inputs + ["-filter_complex", ";".join(filter_chains), "-map", "[out]", "-c:a", "pcm_s16le", output_path]
+            
+            logger.info(f"Running Absolute Aligner: {' '.join(command)}")
             subprocess.run(command, check=True, capture_output=True, text=True)
             return True
         except Exception as e:
-            logger.error(f"Failed to merge audio segments (Serial): {e}")
-            if hasattr(e, 'stderr'):
-                logger.error(f"FFmpeg stderr: {e.stderr}")
+            logger.error(f"Failed to merge segments: {e}")
             return False
+
+    def _group_segments_by_sentence(self, segments: List[Dict]) -> List[Dict]:
+        """Merges chopped Whisper segments into complete sentence blocks for natural TTS flow."""
+        grouped = []
+        if not segments: return grouped
+        
+        current_group = segments[0].copy()
+        
+        for i in range(1, len(segments)):
+            seg = segments[i]
+            prev_text = current_group["text"].strip()
+            # If segments are consecutive (< 0.5s gap) AND the previous doesn't end in sentence terminal
+            is_consecutive = (seg["start"] - current_group["end"] < 0.5)
+            is_fragment = not prev_text.endswith(('.', '?', '!', ':', ';'))
+            
+            if is_consecutive and is_fragment:
+                current_group["text"] += " " + seg["text"]
+                current_group["end"] = seg["end"]
+            else:
+                grouped.append(current_group)
+                current_group = seg.copy()
+                
+        grouped.append(current_group)
+        return grouped
 
 dubbing_service = DubbingService()

@@ -32,6 +32,7 @@ from app.core.database import db_manager
 from app.services.rag_service import rag_service
 from app.services.sbert_service import domain_service
 from app.services.dubbing_service import dubbing_service
+from app.core.gpu_manager import gpu_manager
 from app.ffmpeg_utils import merge_to_ott_video
 
 # Deterministic langdetect (matches Colab seed=0)
@@ -168,6 +169,7 @@ class TranscriptionService:
         start_time = time.monotonic()
         projects_col = db_manager.get_projects_collection()
         loop = asyncio.get_event_loop()
+        current_stage = "Initialization"  # Ensure always defined for error handler
 
         # Prepare unique filenames
         audio_id = str(uuid.uuid4())
@@ -195,9 +197,13 @@ class TranscriptionService:
 
             # ── Step 2: Language Detection (12.5%) ────────────────────
             await update_status(12.5, "Language Detection", "Probing spectral frequencies...")
-            detect_fn = partial(_detect_language, audio_path, self.model)
-            detection = await loop.run_in_executor(None, detect_fn)
-            final_lang = detection["final_language"]
+            await gpu_manager.acquire_gpu("Whisper_Detect")
+            try:
+                detect_fn = partial(_detect_language, audio_path, self.model)
+                detection = await loop.run_in_executor(None, detect_fn)
+                final_lang = detection["final_language"]
+            finally:
+                gpu_manager.release_gpu()
             
             # ── Step 3: Domain Detection (25%) ────────────────────────
             await update_status(25, "Domain Detection", "Analyzing semantic context...")
@@ -206,9 +212,13 @@ class TranscriptionService:
             # ── Step 4: Transcription Generation (37.5%) ──────────────
             current_stage = "Transcription Generation"
             await update_status(37.5, current_stage, f"Generating {final_lang} script...")
-            transcribe_fn = partial(_transcribe_audio, audio_path, final_lang, self.model)
-            result = await loop.run_in_executor(None, transcribe_fn)
-            transcript_text = result.get("clean_text", result.get("text", "")).strip()
+            await gpu_manager.acquire_gpu("Whisper_Transcribe")
+            try:
+                transcribe_fn = partial(_transcribe_audio, audio_path, final_lang, self.model)
+                result = await loop.run_in_executor(None, transcribe_fn)
+                transcript_text = result.get("clean_text", result.get("text", "")).strip()
+            finally:
+                gpu_manager.release_gpu()
 
             # ── Step 5: Parallel Translating (50%) ────────────────────
             current_stage = "Parallel Translating"
@@ -241,7 +251,7 @@ class TranscriptionService:
                 None, rag_service.store_transcript_context, refined_transcript, domain
             )
 
-            audio_results = await dubbing_service.translate_and_dub_parallel(segments, target_langs)
+            audio_results = await dubbing_service.translate_and_dub_parallel(segments, target_langs, audio_path)
 
             # ── Step 8: Mux with Video (87.5%) ────────────────────────
             await update_status(87.5, "Mux with Video", "Finalizing OTT multi-track...")

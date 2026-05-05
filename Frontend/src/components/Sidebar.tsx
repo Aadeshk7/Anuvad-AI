@@ -1,6 +1,6 @@
 import { motion, AnimatePresence } from 'framer-motion';
 import {
-  LayoutDashboard, Upload, RefreshCw, History, LogOut
+  LayoutDashboard, Upload, RefreshCw, History, Globe
 } from 'lucide-react';
 import { useNavigate, useLocation } from 'react-router-dom';
 
@@ -33,47 +33,36 @@ const Sidebar = () => {
       <div
         aria-hidden="true"
         className="absolute top-0 left-0 right-0 h-48 pointer-events-none"
-        style={{
-          background: 'linear-gradient(180deg, rgba(222,200,255,0.18) 0%, transparent 100%)',
-        }}
+        style={{ background: 'linear-gradient(180deg, rgba(222,200,255,0.18) 0%, transparent 100%)' }}
       />
       <div
         aria-hidden="true"
         className="absolute bottom-0 left-0 right-0 h-32 pointer-events-none"
-        style={{
-          background: 'linear-gradient(0deg, rgba(177,242,184,0.12) 0%, transparent 100%)',
-        }}
+        style={{ background: 'linear-gradient(0deg, rgba(177,242,184,0.12) 0%, transparent 100%)' }}
       />
 
-      {/* ── Logo ────────────────────────────────────────────── */}
+      {/* Logo */}
       <motion.div
         whileHover={{ scale: 1.02 }}
         onClick={() => navigate('/')}
         className="flex items-center gap-2.5 mb-10 px-2 cursor-pointer relative z-10"
       >
-        <div
-          className="w-10 h-10 rounded-xl flex items-center justify-center bg-white relative overflow-hidden shadow-lg shadow-purple-500/10 border border-purple-100"
-        >
-          <img 
-            src="/logo.png" 
-            alt="Anuvad Logo" 
-            className="w-full h-full object-contain p-1.5"
-          />
+        <div className="w-10 h-10 rounded-xl flex items-center justify-center bg-white relative overflow-hidden shadow-lg shadow-purple-500/10 border border-purple-100">
+          <img src="/logo.png" alt="Anuvad Logo" className="w-full h-full object-contain p-1.5" />
         </div>
         <span className="text-[22px] font-black tracking-tight text-[#2f2e36]">Anuvad</span>
       </motion.div>
 
-      {/* ── Section label ───────────────────────────────────── */}
+      {/* Section label */}
       <p className="text-[9px] font-bold uppercase tracking-[0.22em] text-gray-400 mb-3 px-4 relative z-10">
         Navigation
       </p>
 
-      {/* ── Nav Items ───────────────────────────────────────── */}
+      {/* Nav Items */}
       <div className="flex-1 space-y-1 relative z-10">
         {menuItems.map((item, idx) => {
-          const isActive  = location.pathname === item.path;
-          const Icon      = item.icon;
-
+          const isActive = location.pathname === item.path;
+          const Icon     = item.icon;
           return (
             <motion.div
               key={item.path}
@@ -85,47 +74,29 @@ const Sidebar = () => {
               className="relative flex items-center justify-between p-3.5 rounded-2xl cursor-pointer transition-all duration-200 group"
               style={isActive ? {
                 background: 'rgba(255,255,255,0.75)',
-                boxShadow:  '0 4px 20px rgba(100,83,130,0.10), inset 0 1px 1px rgba(255,255,255,0.8)',
-              } : {
-                background: 'transparent',
-              }}
+                boxShadow: '0 4px 20px rgba(100,83,130,0.10), inset 0 1px 1px rgba(255,255,255,0.8)',
+              } : { background: 'transparent' }}
             >
-              {/* Active glow blob */}
               {isActive && (
                 <div
                   className="absolute inset-0 rounded-2xl pointer-events-none"
-                  style={{
-                    background: `linear-gradient(135deg, ${item.color}18 0%, transparent 70%)`,
-                  }}
+                  style={{ background: `linear-gradient(135deg, ${item.color}18 0%, transparent 70%)` }}
                 />
               )}
-
               <div className="flex items-center gap-3.5">
-                {/* Icon container */}
                 <div
                   className="w-9 h-9 rounded-xl flex items-center justify-center transition-all duration-200"
                   style={isActive ? {
                     background: `linear-gradient(135deg, ${item.color} 0%, #d946ef 100%)`,
-                    boxShadow:  `0 6px 16px ${item.color}40`,
-                  } : {
-                    background: 'rgba(100,83,130,0.07)',
-                  }}
+                    boxShadow: `0 6px 16px ${item.color}40`,
+                  } : { background: 'rgba(100,83,130,0.07)' }}
                 >
-                  <Icon
-                    size={17}
-                    className="transition-all duration-200"
-                    style={{ color: isActive ? '#fff' : '#7c3aed' }}
-                  />
+                  <Icon size={17} className="transition-all duration-200" style={{ color: isActive ? '#fff' : '#7c3aed' }} />
                 </div>
-                <span
-                  className="text-[14px] font-semibold transition-all duration-200"
-                  style={{ color: isActive ? '#2f2e36' : '#6b6977' }}
-                >
+                <span className="text-[14px] font-semibold transition-all duration-200" style={{ color: isActive ? '#2f2e36' : '#6b6977' }}>
                   {item.label}
                 </span>
               </div>
-
-              {/* Active dot */}
               <AnimatePresence>
                 {isActive && (
                   <motion.div
@@ -143,46 +114,31 @@ const Sidebar = () => {
         })}
       </div>
 
-      {/* ── Divider ─────────────────────────────────────────── */}
+      {/* Divider */}
       <div
         className="my-4 relative z-10"
         style={{ height: 1, background: 'linear-gradient(90deg, transparent, rgba(174,172,182,0.25), transparent)' }}
       />
 
-      {/* ── User Card ───────────────────────────────────────── */}
+      {/* Engine Info Badge — replaces the old fake user card */}
       <motion.div
         whileHover={{ y: -2 }}
-        className="relative z-10 flex items-center justify-between p-4 rounded-2xl cursor-pointer group transition-all"
+        className="relative z-10 flex items-center gap-3 p-4 rounded-2xl"
         style={{
-          background: 'rgba(255,255,255,0.50)',
-          border: '1px solid rgba(174,172,182,0.15)',
-          boxShadow: '0 4px 16px rgba(100,83,130,0.04)',
+          background: 'rgba(124,58,237,0.06)',
+          border: '1px solid rgba(124,58,237,0.12)',
         }}
       >
-        <div className="flex items-center gap-3">
-          {/* Avatar with pulse ring */}
-          <div className="relative">
-            <div
-              className="w-10 h-10 rounded-full flex items-center justify-center text-white font-bold text-sm"
-              style={{ background: 'linear-gradient(135deg, #7c3aed, #d946ef)' }}
-            >
-              JD
-            </div>
-            {/* Online ring */}
-            <div
-              className="absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full border-2 border-white"
-              style={{ background: '#22c55e' }}
-            />
-          </div>
-          <div>
-            <p className="text-sm font-bold text-[#2f2e36]">John Doe</p>
-            <p className="text-[11px] font-semibold" style={{ color: '#a855f7' }}>Pro Account</p>
-          </div>
+        <div
+          className="w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0"
+          style={{ background: 'linear-gradient(135deg, #7c3aed, #d946ef)' }}
+        >
+          <Globe size={16} color="#fff" />
         </div>
-        <LogOut
-          size={16}
-          className="text-gray-400 group-hover:text-red-400 transition-colors"
-        />
+        <div>
+          <p className="text-[13px] font-bold text-[#2f2e36]">Neural-Sync Engine</p>
+          <p className="text-[11px] font-semibold" style={{ color: '#a855f7' }}>6 Indic Languages</p>
+        </div>
       </motion.div>
     </motion.div>
   );

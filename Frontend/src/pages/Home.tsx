@@ -1,7 +1,9 @@
 import { motion, useScroll, useTransform } from 'framer-motion';
-import { Search, User, ArrowRight, Zap, Globe, Layers } from 'lucide-react';
+import { ArrowRight, Zap, Globe, Layers, LogOut } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
-import { useRef } from 'react';
+import { useRef, useState } from 'react';
+import { useAuth } from '../context/AuthContext';
+import AuthModal from '../components/AuthModal';
 
 /* ── Stagger variants ───────────────────────────────────────── */
 const container: any = {
@@ -26,7 +28,7 @@ const features: Array<{ Icon: any, title: string, desc: string, accent: string, 
   {
     Icon:  Globe,
     title: 'AI Subtitles',
-    desc:  'Auto-generate perfectly-synced, accurate subtitles in हिन्दी and 10+ Indian regional scripts.',
+    desc:  'Auto-generate perfectly-synced, accurate subtitles in हिन्दी and all 6 supported Indic scripts.',
     accent: '#ec4899',
     from: 'from-pink-50',
     badge: 'rgba(236,72,153,0.10)',
@@ -80,6 +82,11 @@ const Home = () => {
   const heroRef  = useRef<HTMLDivElement>(null);
   const { scrollYProgress } = useScroll({ target: heroRef, offset: ['start start', 'end start'] });
   const blobY = useTransform(scrollYProgress, [0, 1], ['0%', '20%']);
+  const { user, logout } = useAuth();
+  const [authOpen, setAuthOpen] = useState(false);
+  const [authMode, setAuthMode] = useState<'login' | 'signup'>('login');
+
+  const openAuth = (mode: 'login' | 'signup') => { setAuthMode(mode); setAuthOpen(true); };
 
   return (
     <div className="h-screen w-full flex flex-col overflow-hidden text-[#2f2e36]" style={{ background: '#f9f5ff' }}>
@@ -200,20 +207,55 @@ const Home = () => {
           </motion.div>
 
           {/* Right actions */}
-          <div className="flex items-center gap-5">
-            <Search size={20} className="text-gray-400 cursor-pointer hover:text-[#7c3aed] transition-colors" />
-            <User   size={20} className="text-gray-400 cursor-pointer hover:text-[#7c3aed] transition-colors" />
-            <motion.button
-              whileHover={{ scale:1.04 }}
-              whileTap={{ scale:0.97 }}
-              onClick={() => navigate('/dashboard')}
-              className="btn-primary text-[12px] px-7 py-3"
-            >
-              Try Now <ArrowRight size={14} />
-            </motion.button>
+          <div className="flex items-center gap-3">
+            {user ? (
+              // ── Logged-in state ──────────────────────────────
+              <div className="flex items-center gap-3">
+                <div className="flex items-center gap-2.5 px-4 py-2 rounded-2xl"
+                  style={{ background: 'rgba(124,58,237,0.07)', border: '1px solid rgba(124,58,237,0.12)' }}>
+                  <div
+                    className="w-7 h-7 rounded-full flex items-center justify-center text-white text-[11px] font-black"
+                    style={{ background: 'linear-gradient(135deg,#7c3aed,#d946ef)' }}
+                  >
+                    {user.name.charAt(0).toUpperCase()}
+                  </div>
+                  <span className="text-[13px] font-bold text-[#2f2e36]">{user.name.split(' ')[0]}</span>
+                </div>
+                <motion.button
+                  whileHover={{ scale: 1.04 }} whileTap={{ scale: 0.97 }}
+                  onClick={logout}
+                  className="flex items-center gap-1.5 px-4 py-2 rounded-2xl text-[12px] font-black transition-all"
+                  style={{ background: 'rgba(239,68,68,0.07)', color: '#ef4444', border: '1px solid rgba(239,68,68,0.14)' }}
+                >
+                  <LogOut size={13} /> Logout
+                </motion.button>
+              </div>
+            ) : (
+              // ── Logged-out state ──────────────────────────────
+              <div className="flex items-center gap-3">
+                <motion.button
+                  whileHover={{ scale: 1.03 }} whileTap={{ scale: 0.97 }}
+                  onClick={() => openAuth('login')}
+                  className="text-[12px] px-6 py-2.5 rounded-2xl font-black transition-all"
+                  style={{ color: '#7c3aed', border: '1.5px solid rgba(124,58,237,0.22)', background: 'rgba(124,58,237,0.05)' }}
+                >
+                  Sign In
+                </motion.button>
+                <motion.button
+                  whileHover={{ scale: 1.04 }} whileTap={{ scale: 0.97 }}
+                  onClick={() => openAuth('signup')}
+                  className="btn-primary text-[12px] px-7 py-2.5"
+                >
+                  Sign Up <ArrowRight size={13} />
+                </motion.button>
+              </div>
+            )}
           </div>
         </div>
       </motion.nav>
+
+      {/* Auth Modal */}
+      <AuthModal isOpen={authOpen} onClose={() => setAuthOpen(false)} defaultMode={authMode} onSuccess={() => navigate('/upload')} />
 
       {/* ── Scrollable Content Area ────────────────────────── */}
       <div className="flex-1 overflow-y-auto overflow-x-hidden relative scroll-container">
@@ -262,8 +304,8 @@ const Home = () => {
               style={{ color:'#5c5a63' }}
             >
               Generate AI voiceovers in{' '}
-              <span className="font-bold" style={{ color:'#7c3aed' }}>हिन्दी, தமிழ், বাংলা</span>{' '}
-              & 10+ Indian languages. Upload once, localize everywhere — fast, accurate, human.
+              <span className="font-bold" style={{ color:'#7c3aed' }}>हिन्दी, தமிழ், తెలుగు</span>{' '}
+              &amp; 3 more Indic languages. Upload once, localize everywhere — fast, accurate, human.
             </motion.p>
 
             {/* CTAs */}
@@ -271,19 +313,19 @@ const Home = () => {
               <motion.button
                 whileHover={{ scale:1.05 }}
                 whileTap={{ scale:0.96 }}
-                onClick={() => navigate('/dashboard')}
+                onClick={() => navigate('/upload')}
                 className="btn-primary text-[13px] px-10 py-5 flex items-center gap-2"
               >
-                Get Started Free <ArrowRight size={16} />
+                Start Localizing <ArrowRight size={16} />
               </motion.button>
               <motion.button
                 whileHover={{ scale:1.03 }}
                 whileTap={{ scale:0.97 }}
-                onClick={() => navigate('/upload')}
+                onClick={() => navigate('/dashboard')}
                 className="text-[13px] px-10 py-5 flex items-center gap-2 rounded-full font-black tracking-wide"
                 style={{ background:'rgba(124,58,237,0.07)', color:'#7c3aed', border:'1px solid rgba(124,58,237,0.18)' }}
               >
-                Try Demo
+                View Dashboard
               </motion.button>
             </motion.div>
 

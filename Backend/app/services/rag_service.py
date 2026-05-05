@@ -49,6 +49,7 @@ class RAGService:
         self.embed_model = None
         self.llm_model = None
         self.llm_tokenizer = None
+        self.llm_load_err = None  # Track load errors
 
         # ── NEW: One FAISS index + document list per domain ───────────────────
         # { "STEM": faiss.Index, "Humanities": faiss.Index, ... }
@@ -69,7 +70,9 @@ class RAGService:
         if self.embed_model is None:
             logger.info("Loading SBERT for RAG indexing...")
             try:
-                self.embed_model = SentenceTransformer('all-MiniLM-L6-v2', device=self.device)
+                # SBERT is small enough for GPU if we use it intermittently 
+                # but let's keep it on CPU to maximize VRAM for core dubbing
+                self.embed_model = SentenceTransformer('all-MiniLM-L6-v2', device="cpu")
             except Exception as e:
                 logger.error(f"Failed to load RAG embed model: {e}")
                 self.embed_model = "FAILED"
@@ -77,23 +80,27 @@ class RAGService:
     def _load_llm_model(self):
         if self.llm_model is None:
             model_name = "ibm-granite/granite-3.0-2b-instruct"
-            logger.info(f"Loading IBM Granite model: {model_name}...")
+            logger.info(f"Loading IBM Granite model: {model_name} (CPU ONLY)...")
 
             import time, traceback
             max_retries = 2
             for attempt in range(max_retries):
                 try:
                     hf_token = os.getenv("HF_TOKEN")
-                    self.llm_tokenizer = AutoTokenizer.from_pretrained(model_name, token=hf_token)
+                    self.llm_tokenizer = AutoTokenizer.from_pretrained(
+                        model_name,
+                        token=hf_token
+                    )
+                    # Force CPU to save VRAM for transcription and translation
                     self.llm_model = AutoModelForCausalLM.from_pretrained(
                         model_name,
                         token=hf_token,
                         trust_remote_code=True,
                         low_cpu_mem_usage=True,
                         torch_dtype=torch.float32,
-                        device_map="cpu"
+                        device_map="cpu"  # Fixed: string instead of dict
                     )
-                    logger.info("Granite model loaded successfully on CPU.")
+                    logger.info("✅ Granite model loaded successfully on CPU.")
                     self.llm_load_err = None
                     break
                 except Exception as e:
@@ -103,6 +110,7 @@ class RAGService:
                         time.sleep(1)
                     else:
                         self.llm_model = "FAILED"
+                        logger.error(f"Granite failed to load after {max_retries} attempts. Error:\n{self.llm_load_err}")
         elif self.llm_model == "FAILED":
             return
 
@@ -286,56 +294,65 @@ class RAGService:
     def refine_with_granite(self, transcript: str, context: str) -> str:
         """Use IBM Granite to standardize and refine the transcript based on context."""
         self._load_llm_model()
-        if self.llm_model == "FAILED":
-            logger.warning("Granite refinement skipped due to model loading failure.")
+        if self.llm_model is None or self.llm_model == "FAILED":
+            logger.warning(f"Granite refinement skipped. Reason: {self.llm_load_err or 'Model not loaded'}")
             return transcript
 
-        prompt = f"""
-System: You are an expert AI educational content editor for a multilingual video localization system.
-
-Your task is to refine raw speech-to-text transcripts into accurate, structured, and pedagogically correct educational content.
+        try:
+            prompt = f"""<|system|>
+You are an expert AI educational content editor for a multilingual video localization system.
+Your task is to refine raw speech-to-text transcripts into accurate, structured educational content.
 
 You MUST:
 - Correct grammar and spelling errors
-- Convert phonetic mathematical expressions into proper notation (e.g., "x square" → x²)
+- Convert phonetic mathematical expressions into proper notation (e.g., "x square" -> x²)
 - Improve clarity for educational use
 - Preserve meaning exactly
 - Use provided context only if relevant
-
-You will receive:
-1. Raw transcript from speech recognition system
-2. Retrieved educational context from vector database (FAISS) if available
-
-If context is provided, use it to improve accuracy.
-If context is empty, rely on your own knowledge.
-
-Do NOT translate the text. Only refine and correct it.
-
+- Do NOT translate. Only refine and correct.
+<|user|>
 Raw Transcript:
 {transcript}
 
 Retrieved Context (RAG):
-{context}
+{context if context else 'No context available.'}
 
-Task:
 Refine the transcript into a clean, structured educational script.
-Fix mathematical and scientific expressions.
+<|assistant|>
+"""
 
-Refined Transcript:"""
+            inputs = self.llm_tokenizer(
+                prompt,
+                return_tensors="pt",
+                truncation=True,
+                max_length=2048
+            ).to("cpu")
 
-        inputs = self.llm_tokenizer(prompt, return_tensors="pt").to(self.device)
+            with torch.no_grad():
+                outputs = self.llm_model.generate(
+                    **inputs,
+                    max_new_tokens=300,
+                    temperature=0.2,
+                    do_sample=True,
+                    pad_token_id=self.llm_tokenizer.eos_token_id,
+                    eos_token_id=self.llm_tokenizer.eos_token_id,
+                )
 
-        with torch.no_grad():
-            outputs = self.llm_model.generate(
-                **inputs,
-                max_new_tokens=len(inputs["input_ids"][0]) + 300,
-                temperature=0.2,
-                do_sample=True
-            )
+            # Decode only the newly generated tokens (not the prompt)
+            input_length = inputs["input_ids"].shape[1]
+            new_tokens = outputs[0][input_length:]
+            refined_text = self.llm_tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
+            
+            if not refined_text:
+                logger.warning("Granite returned empty output; using original transcript.")
+                return transcript
+                
+            logger.info("✅ Granite refinement complete.")
+            return refined_text
 
-        full_text = self.llm_tokenizer.decode(outputs[0], skip_special_tokens=True)
-        refined_text = full_text.split("Refined Transcript:")[-1].strip()
-        return refined_text
+        except Exception as e:
+            logger.error(f"Granite generation failed: {e}")
+            return transcript
 
 
 rag_service = RAGService()

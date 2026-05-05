@@ -52,7 +52,7 @@ def extract_audio(video_path: str, audio_output_path: str, timeout: int = 300) -
         "-threads", "0",                # auto thread count
         "-i", video_path,
         "-vn",                          # no video
-        "-af", "afftdn=nr=12:nf=-35:tn=1,highpass=f=100,silenceremove=stop_periods=-1:stop_duration=1:stop_threshold=-40dB,aresample=resampler=swr",  # Denoise + Mute/Silence Removal + highpass + resampling
+        "-af", "afftdn=nr=12:nf=-35:tn=1,highpass=f=100,aresample=resampler=swr",  # Denoise + highpass + resampling
         "-acodec", "pcm_s16le",         # 16-bit PCM (Whisper requirement)
         "-ar", "16000",                 # 16 kHz sample rate
         "-ac", "1",                     # mono channel
